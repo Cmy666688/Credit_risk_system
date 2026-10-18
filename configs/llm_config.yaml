@@ -71,6 +71,16 @@ prompts:
       你可以回答关于数据、模型、风控业务的各类问题。
       回答要简洁、准确、有依据。如果不确定，请明确说明。
 
+  # 政策合规检查
+  compliance_check:
+    template_file: "compliance_check.j2"
+    system_role: |
+      你是一名银行合规审查员，负责审查贷款审批是否符合监管要求。
+      你需要在"合规 / 不合规 / 信息不足待核实"三种结论中严格择一给出，
+      并分别说明缺失材料、被违反的规则以及改进建议。
+      缺少关键信息时必须判为 insufficient_info，不得臆造事实或凭空推断合规性。
+      严格按要求输出 JSON，不要输出多余文字。
+
 # ===== Agent 行为配置 =====
 agents:
 
@@ -88,6 +98,7 @@ agents:
     sample_size: 1000          # 发送给 LLM 的样本数
     max_suggestions: 10
     include_code: true         # 是否生成可执行代码
+    max_tokens: 8000           # 该模型为推理型，思维链会占用大量 token；过小会因截断返回空内容
 
   # 异常案例分析 Agent
   case_agent:
@@ -100,6 +111,12 @@ agents:
     enabled: true
     max_history_turns: 10      # 上下文最大对话轮数
     streaming: true
+
+  # 政策合规检查 Agent
+  compliance:
+    enabled: true
+    temperature: 0.1           # 合规要求确定性，温度调低
+    max_tokens: 8000           # 该模型为推理型，思维链会占用大量 token；过小会因截断返回空内容
 
 # ===== 安全与合规 =====
 safety:

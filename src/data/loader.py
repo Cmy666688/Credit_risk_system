@@ -18,6 +18,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 
 from src.utils.logger import get_logger
+from src.data.adapters import ADAPTER_REGISTRY
 
 logger = get_logger("data.loader")
 
@@ -35,6 +36,18 @@ class DataLoader:
         self.config = config
         self.paths = config.paths
 
+    # -------- 多数据源支持（扩展点 3：添加新数据源） --------
+    def _active_source(self):
+        """返回当前数据源 (名称, 配置块)，默认 tianchi。"""
+        source = getattr(self.paths, "source", "tianchi")
+        sources = getattr(self.config, "sources", None) or {}
+        return source, (sources.get(source) or {})
+
+    def _source_path(self, key: str, fallback: str) -> str:
+        """优先取当前数据源里的路径/文件名，否则回退到全局 paths。"""
+        _, cfg = self._active_source()
+        return cfg.get(key, fallback)
+
     def load_train(self, use_sample: bool = False) -> pd.DataFrame:
         """
         加载训练集。
@@ -45,13 +58,17 @@ class DataLoader:
         if use_sample:
             file_path = Path(self.paths.sample_dir) / self.paths.sample_file
         else:
-            file_path = Path(self.paths.raw_dir) / self.paths.train_file
+            raw_dir = self._source_path("raw_dir", self.paths.raw_dir)
+            train_file = self._source_path("train_file", self.paths.train_file)
+            file_path = Path(raw_dir) / train_file
 
         return self._load_csv(file_path)
 
     def load_test(self) -> pd.DataFrame:
         """加载测试集"""
-        file_path = Path(self.paths.raw_dir) / self.paths.test_file
+        raw_dir = self._source_path("raw_dir", self.paths.raw_dir)
+        test_file = self._source_path("test_file", self.paths.test_file)
+        file_path = Path(raw_dir) / test_file
         return self._load_csv(file_path)
 
     def _load_csv(self, file_path: Path) -> pd.DataFrame:
@@ -87,7 +104,40 @@ class DataLoader:
                 low_memory=loading_cfg.low_memory,
             )
 
+        # 多数据源：按配置套用 Adapter，把外部 schema 归一化成天池 schema
+        df = self._apply_adapter(df)
+
         logger.info(f"数据加载完成 - shape: {df.shape}")
+        return df
+
+    def _apply_adapter(self, df: pd.DataFrame) -> pd.DataFrame:
+        """依据当前数据源配置，把外部数据归一化成天池 schema。
+
+        配置来源：configs/data_config.yaml 的 paths.source + sources[source].adapter。
+        adapter 为 null 时表示无需适配（如天池原生数据）。
+        """
+        source, source_cfg = self._active_source()
+        adapter_name = source_cfg.get("adapter")
+        if not adapter_name:
+            return df
+
+        if adapter_name not in ADAPTER_REGISTRY:
+            raise KeyError(
+                f"未知数据源 Adapter: {adapter_name}，"
+                f"可选: {list(ADAPTER_REGISTRY)}"
+            )
+
+        adapter = ADAPTER_REGISTRY[adapter_name]()
+        df = adapter.transform(df)
+
+        # 归一化后必须满足 data_config 声明的字段契约，缺列尽早报错
+        required = (
+            list(self.config.columns.numerical)
+            + list(self.config.columns.categorical)
+            + [self.config.target_column, self.config.id_column]
+        )
+        adapter.validate(df, required)
+        logger.info(f"已套用 Adapter: {adapter_name} - shape: {df.shape}")
         return df
 
     def get_data_summary(self, df: pd.DataFrame) -> dict:

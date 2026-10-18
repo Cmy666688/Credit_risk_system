@@ -27,6 +27,7 @@ from src.data.preprocessor import Preprocessor
 from src.features.builder import FeatureBuilder
 from src.features.selector import FeatureSelector
 from src.models.xgb_model import XGBModel
+from src.models.lgb_model import LGBModel
 from src.models.mlp_model import MLPModel
 from src.models.ensemble import EnsembleModel
 from src.tuning.optimizer import OptunaOptimizer
@@ -68,6 +69,7 @@ class TrainingPipeline:
         self.y_test = None
 
         self.xgb_model: Optional[XGBModel] = None
+        self.lgb_model: Optional[LGBModel] = None
         self.mlp_model: Optional[MLPModel] = None
         self.ensemble: Optional[EnsembleModel] = None
 
@@ -78,6 +80,7 @@ class TrainingPipeline:
         self,
         use_sample: bool = False,
         skip_mlp: bool = False,
+        skip_lgb: bool = False,
         skip_tuning: bool = True,
         progress_callback=None,
     ) -> Dict[str, Any]:
@@ -87,6 +90,7 @@ class TrainingPipeline:
         参数:
             use_sample: 使用示例数据
             skip_mlp: 跳过 MLP 训练（快速调试）
+            skip_lgb: 跳过 LightGBM 训练（快速调试）
             skip_tuning: 跳过超参优化（默认跳过，节省时间）
             progress_callback: 进度回调函数 (step_name, progress_pct)
 
@@ -107,8 +111,13 @@ class TrainingPipeline:
             ("训练 XGBoost", self._step_train_xgb, {"with_tuning": not skip_tuning}),
         ]
 
+        if not skip_lgb:
+            steps.append(("训练 LightGBM", self._step_train_lgb, {}))
         if not skip_mlp:
             steps.append(("训练 MLP", self._step_train_mlp, {}))
+
+        # 至少两个基模型才做融合
+        if not (skip_lgb and skip_mlp):
             steps.append(("模型融合", self._step_ensemble, {}))
 
         steps.append(("评估", self._step_evaluate, {}))
@@ -228,6 +237,14 @@ class TrainingPipeline:
         self.xgb_model = XGBModel(self.model_cfg.xgboost)
         self.xgb_model.fit(self.X_train, self.y_train, self.X_val, self.y_val)
 
+    def _step_train_lgb(self) -> None:
+        if not self.model_cfg.lightgbm.enabled:
+            logger.info("跳过 LightGBM 训练")
+            return
+
+        self.lgb_model = LGBModel(self.model_cfg.lightgbm)
+        self.lgb_model.fit(self.X_train, self.y_train, self.X_val, self.y_val)
+
     def _step_train_mlp(self) -> None:
         if not self.model_cfg.mlp.enabled:
             logger.info("跳过 MLP 训练")
@@ -239,33 +256,46 @@ class TrainingPipeline:
     def _step_ensemble(self) -> None:
         if not self.model_cfg.ensemble.enabled:
             return
-        if self.xgb_model is None or self.mlp_model is None:
-            logger.warning("基模型不全，跳过融合")
+        base_models = {
+            "xgboost": self.xgb_model,
+            "lightgbm": self.lgb_model,
+            "mlp": self.mlp_model,
+        }
+        base_models = {k: m for k, m in base_models.items() if m is not None}
+        if len(base_models) < 2:
+            logger.warning(f"基模型不足 2 个（当前: {list(base_models)}），跳过融合")
             return
 
         self.ensemble = EnsembleModel(self.model_cfg.ensemble)
-        self.ensemble.add_model("xgboost", self.xgb_model)
-        self.ensemble.add_model("mlp", self.mlp_model)
+        for name, model in base_models.items():
+            self.ensemble.add_model(name, model)
         self.ensemble.fit(self.X_train, self.y_train)
 
     def _step_evaluate(self) -> None:
         evaluator = Evaluator()
 
-        # 评估各个模型
-        if self.xgb_model is not None:
-            y_pred = self.xgb_model.predict_proba(self.X_test)
-            self.eval_results["xgboost"] = evaluator.evaluate(self.y_test, y_pred).to_dict()
-            logger.info(f"XGBoost: {self.eval_results['xgboost']}")
+        def _evaluate_model(name: str, model) -> None:
+            """评估单个模型，失败时抛出带模型名的清晰错误。"""
+            if model is None:
+                return
+            try:
+                y_pred = model.predict_proba(self.X_test)
+                self.eval_results[name] = evaluator.evaluate(self.y_test, y_pred).to_dict()
+                logger.info(f"{name}: {self.eval_results[name]}")
+            except Exception as e:
+                logger.error(f"模型 [{name}] 评估失败: {e}", exc_info=True)
+                raise RuntimeError(f"模型 [{name}] 评估失败: {e}") from e
 
-        if self.mlp_model is not None:
-            y_pred = self.mlp_model.predict_proba(self.X_test)
-            self.eval_results["mlp"] = evaluator.evaluate(self.y_test, y_pred).to_dict()
-            logger.info(f"MLP: {self.eval_results['mlp']}")
+        _evaluate_model("xgboost", self.xgb_model)
+        _evaluate_model("lightgbm", self.lgb_model)
+        _evaluate_model("mlp", self.mlp_model)
+        _evaluate_model("ensemble", self.ensemble)
 
-        if self.ensemble is not None:
-            y_pred = self.ensemble.predict_proba(self.X_test)
-            self.eval_results["ensemble"] = evaluator.evaluate(self.y_test, y_pred).to_dict()
-            logger.info(f"Ensemble: {self.eval_results['ensemble']}")
+        if not self.eval_results:
+            raise RuntimeError(
+                "评估步骤未产生任何指标：所有模型均为 None"
+                "（可能全部被跳过或训练阶段失败）。"
+            )
 
     def _step_save_artifacts(self) -> None:
         manager = ArtifactManager(self.model_cfg.persistence.save_dir, self.run_id)
@@ -295,6 +325,10 @@ class ArtifactManager:
             pipeline.xgb_model.save(str(self.run_dir / "xgb_model.json"))
             pipeline.xgb_model.save(str(self.latest_dir / "xgb_model.json"))
 
+        if pipeline.lgb_model is not None:
+            pipeline.lgb_model.save(str(self.run_dir / "lgb_model.txt"))
+            pipeline.lgb_model.save(str(self.latest_dir / "lgb_model.txt"))
+
         if pipeline.mlp_model is not None:
             pipeline.mlp_model.save(str(self.run_dir / "mlp_model.pth"))
             pipeline.mlp_model.save(str(self.latest_dir / "mlp_model.pth"))
@@ -313,9 +347,23 @@ class ArtifactManager:
             joblib.dump(pipeline.feature_selector, self.latest_dir / "feature_selector.pkl")
 
         # 3. 评估结果
+        # 关键：必须同时写入 run 目录和 latest 目录。
+        # 前端（模型训练页 / 侧边栏 / LLM 助手）统一读取 latest/eval_results.json，
+        # 若只写 run 目录，训练完成后页面会因为没有评估文件而“静默”不显示任何指标。
+        if not pipeline.eval_results:
+            raise RuntimeError(
+                "评估结果为空：未生成任何模型指标，无法保存。"
+                "请检查是否所有模型都被跳过（enabled=false），或评估步骤是否异常终止。"
+            )
+
         eval_path = self.run_dir / "eval_results.json"
         with open(eval_path, "w", encoding="utf-8") as f:
             json.dump(pipeline.eval_results, f, ensure_ascii=False, indent=2)
+
+        latest_eval_path = self.latest_dir / "eval_results.json"
+        with open(latest_eval_path, "w", encoding="utf-8") as f:
+            json.dump(pipeline.eval_results, f, ensure_ascii=False, indent=2)
+        logger.info(f"评估结果已写入: {eval_path} 与 {latest_eval_path}")
 
         # 4. 元信息
         meta = {

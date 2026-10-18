@@ -22,8 +22,69 @@ from app.components.chart_utils import gauge_chart, shap_waterfall
 st.set_page_config(page_title="单笔预测", page_icon="🎯", layout="wide")
 render_sidebar()
 
+# ===== 登录门禁（登录用户均可访问）=====
+from app.components.auth_gate import require_login
+require_login()
+
 st.title("🎯 单笔贷款风险评估")
 st.caption("模拟一个完整的贷款审批流程：录入信息 → 模型预测 → SHAP 解释 → LLM 报告")
+
+# ===== 风险等级配色（与全局设计语言一致）=====
+_RISK_COLORS = {"green": "#28a745", "orange": "#d97706", "red": "#dc3545"}
+
+# ===== 预测结果区样式（作用域限定在结果容器内，避免影响其它页面）=====
+st.markdown("""
+<style>
+/* 结论横幅：栅格布局，用 1px 间隙形成清晰分隔线 */
+.pred-hero {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 1px;
+    background: #e9ecef;
+    border: 1px solid #e9ecef;
+    border-radius: 12px;
+    overflow: hidden;
+    margin: 0.25rem 0 1.5rem 0;
+}
+.pred-hero__cell {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    min-width: 0;
+    padding: 18px 22px;
+    background: #f8f9fa;
+}
+.pred-hero__label {
+    font-size: 0.8rem;
+    font-weight: 600;
+    letter-spacing: 0.03em;
+    color: #6c757d;
+}
+.pred-hero__value {
+    font-size: 1.9rem;
+    font-weight: 700;
+    line-height: 1.15;
+    color: #1a3a5c;
+    overflow-wrap: anywhere;
+}
+.pred-hero__value--sub { font-size: 1.35rem; }
+.pred-hero__unit { font-size: 1.05rem; font-weight: 600; margin-left: 2px; }
+
+/* 中屏两列、窄屏单列，保证信息不重叠、不被截断 */
+@media (max-width: 900px) {
+    .pred-hero { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (max-width: 560px) {
+    .pred-hero { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* 窄屏下结果区内的多栏自动堆叠，避免图表被挤压错位 */
+@media (max-width: 768px) {
+    .st-key-pred_result [data-testid="stHorizontalBlock"] { flex-wrap: wrap !important; }
+    .st-key-pred_result [data-testid="stColumn"] { min-width: 100% !important; }
+}
+</style>
+""", unsafe_allow_html=True)
 
 configs = st.session_state.get("configs")
 if configs is None:
@@ -127,10 +188,54 @@ def _build_complete_report(
     return "\n".join(lines)
 
 
+# 三态结论 -> (Streamlit 展示方法, 结论文案)
+_COMPLIANCE_VERDICTS = {
+    "compliant": ("success", "✅ 合规：有足够证据证明本次审批符合全部监管要求"),
+    "non_compliant": ("error", "❌ 不合规：存在明确违反监管规则的情形"),
+    "insufficient_info": (
+        "warning",
+        "⚠️ 信息不足：关键材料缺失，暂无法判定合规性，需补齐后复核",
+    ),
+}
+
+
+def _render_compliance_result(result: dict) -> None:
+    """展示合规检查结果（三态结论 / 结论说明 / 违规项 / 待核实项 / 改进建议）"""
+    verdict = str(result.get("verdict") or "").strip().lower()
+    style, title = _COMPLIANCE_VERDICTS.get(
+        verdict, ("info", f"ℹ️ 未知结论：{verdict or '模型未返回 verdict'}")
+    )
+    getattr(st, style)(title)
+
+    if result.get("summary"):
+        st.markdown(f"**审查结论：**{result['summary']}")
+
+    violations = result.get("violations") or []
+    if violations:
+        st.markdown("#### 🚫 违规项")
+        st.dataframe(pd.DataFrame(violations), use_container_width=True, hide_index=True)
+    elif verdict == "non_compliant":
+        st.caption("模型判定为不合规，但未给出具体违规项，建议人工复核该结论。")
+
+    warnings = result.get("warnings") or []
+    if warnings:
+        st.markdown(
+            "#### ⚠️ 待核实项" if verdict == "insufficient_info" else "#### ⚠️ 提示项"
+        )
+        for w in warnings:
+            st.warning(w)
+
+    recommendations = result.get("recommendations") or []
+    if recommendations:
+        st.markdown("#### 💡 改进建议")
+        for r in recommendations:
+            st.markdown(f"- {r}")
+
+
 # ===== 加载模型 =====
 @st.cache_resource
-def load_xgb_model():
-    """加载已训练的 XGBoost 模型"""
+def _load_xgb():
+    """加载 XGBoost 基模型"""
     from src.models.xgb_model import XGBModel
 
     model_path = ROOT / "data" / "models" / "latest" / "xgb_model.json"
@@ -140,6 +245,73 @@ def load_xgb_model():
     model = XGBModel(configs.get("model").xgboost)
     model.load(str(model_path))
     return model
+
+
+@st.cache_resource
+def _load_lgb():
+    """加载 LightGBM 基模型"""
+    from src.models.lgb_model import LGBModel
+
+    model_path = ROOT / "data" / "models" / "latest" / "lgb_model.txt"
+    if not model_path.exists():
+        return None
+
+    model = LGBModel(configs.get("model").lightgbm)
+    model.load(str(model_path))
+    return model
+
+
+@st.cache_resource
+def _load_mlp():
+    """加载 MLP 基模型"""
+    from src.models.mlp_model import MLPModel
+
+    model_path = ROOT / "data" / "models" / "latest" / "mlp_model.pth"
+    if not model_path.exists():
+        return None
+
+    model = MLPModel(configs.get("model").mlp)
+    model.load(str(model_path))
+    return model
+
+
+@st.cache_resource
+def load_model(model_key: str):
+    """加载已训练的模型（ensemble / xgboost / lightgbm）"""
+    if model_key == "ensemble":
+        # ===== 融合模型（最优，推荐给业务用户）=====
+        # 三个基模型分别加载，再按 ensemble.json 保存的权重组合
+        from src.models.ensemble import EnsembleModel
+
+        ens_path = ROOT / "data" / "models" / "latest" / "ensemble.json"
+        if not ens_path.exists():
+            return None
+
+        base_models = {
+            "xgboost": _load_xgb(),
+            "lightgbm": _load_lgb(),
+            "mlp": _load_mlp(),
+        }
+
+        ens = EnsembleModel(configs.get("model").ensemble)
+        ens.load(str(ens_path))
+
+        # 只挂载融合配置中实际保存的基模型
+        info = json.loads(ens_path.read_text(encoding="utf-8"))
+        for name in info.get("model_names", []):
+            m = base_models.get(name)
+            if m is None:
+                return None  # 基模型产物缺失，无法融合
+            ens.add_model(name, m, weight=ens.model_weights.get(name, 1.0))
+
+        # SHAP 解释基于 XGBoost 基模型（融合模型本身无原生 explainer）
+        ens.shap_base_model = base_models["xgboost"]
+        return ens
+
+    if model_key == "lightgbm":
+        return _load_lgb()
+
+    return _load_xgb()
 
 
 @st.cache_resource
@@ -161,7 +333,7 @@ def load_feature_selector():
 
 
 @st.cache_resource
-def load_shap_analyzer(_model, sample_data_hash: str):
+def load_shap_analyzer(_model, cache_key: str, explainer_type: str = "auto"):
     """加载/构建 SHAP 分析器（缓存）"""
     from src.explain.shap_analyzer import SHAPAnalyzer
     from app.components.data_utils import find_data_file
@@ -197,17 +369,34 @@ def load_shap_analyzer(_model, sample_data_hash: str):
 
     # 构建 SHAP
     analyzer = SHAPAnalyzer()
-    analyzer.fit(_model.model, X_processed.head(500))
+    analyzer.fit(_model.model, X_processed.head(500), explainer_type=explainer_type)
     return analyzer
 
 
+# ===== 选择预测模型 =====
+MODEL_OPTIONS = {
+    "Ensemble 融合模型（推荐 · 最优 AUC）": "ensemble",
+    "XGBoost": "xgboost",
+    "LightGBM": "lightgbm",
+}
+model_label = st.selectbox(
+    "预测模型",
+    options=list(MODEL_OPTIONS.keys()),
+    index=0,
+    help=(
+        "Ensemble 为 XGBoost + LightGBM + MLP 加权融合，测试集 AUC 最高，"
+        "推荐业务用户使用；选择 Ensemble 时 SHAP 解释基于 XGBoost 基模型"
+    ),
+)
+model_key = MODEL_OPTIONS[model_label]
+
 # ===== 检查模型状态 =====
-xgb_model = load_xgb_model()
+model = load_model(model_key)
 prep = load_preprocessor()
 selector = load_feature_selector()
 
-if xgb_model is None or prep is None:
-    st.warning("⚠️ 模型未训练，请先在 **🤖 模型训练** 页面完成训练")
+if model is None or prep is None:
+    st.warning(f"⚠️ {model_label} 模型未训练，请先在 **🤖 模型训练** 页面完成训练")
     st.stop()
 
 # ===== 输入表单 =====
@@ -312,11 +501,13 @@ if submitted:
             X = selector.transform(X)
 
         # 4. 预测
-        proba = xgb_model.predict_proba(X)[0]
+        proba = model.predict_proba(X)[0]
         prob_pct = proba * 100
 
-        # 5. SHAP 解释
-        analyzer = load_shap_analyzer(xgb_model, "v1")
+        # 5. SHAP 解释（融合模型基于 XGBoost 基模型解释）
+        explainer_type = "tree" if model_key == "lightgbm" else "auto"
+        shap_model = getattr(model, "shap_base_model", None) or model
+        analyzer = load_shap_analyzer(shap_model, model_key, explainer_type)
         explanation = analyzer.explain_single(X.iloc[0]) if analyzer else None
 
         # 6. 风险分级
@@ -326,6 +517,21 @@ if submitted:
             risk_level, risk_color, recommendation = "中风险", "orange", "⚠️ 人工复核"
         else:
             risk_level, risk_color, recommendation = "高风险", "red", "❌ 建议拒绝"
+
+        # 7. 记录预测日志（管理员可在用户管理页审计；失败不影响预测主流程）
+        try:
+            from app.components.auth_gate import _get_auth_manager
+
+            _get_auth_manager().log_prediction(
+                user=st.session_state["user"],
+                model_name=model_label,
+                probability=proba,
+                risk_level=risk_level,
+                loan_amount=float(loan_amnt),
+                recommendation=recommendation,
+            )
+        except Exception:
+            pass  # 审计日志写入失败时静默降级，不阻断用户预测
 
     # 关键：把预测结果写到 session_state，确保跨 rerun 持久化
     st.session_state["prediction"] = {
@@ -337,8 +543,9 @@ if submitted:
         "risk_color": risk_color,
         "recommendation": recommendation,
     }
-    # 提交新预测时清掉旧报告，避免新预测看到旧报告
+    # 提交新预测时清掉旧报告/旧合规检查，避免新预测看到旧结果
     st.session_state.pop("llm_report", None)
+    st.session_state.pop("compliance_result", None)
 
 
 # ===== 展示结果（从 session_state 读，不依赖 submitted） =====
@@ -362,50 +569,115 @@ if "prediction" in st.session_state:
         if st.button("🗑️ 清除结果", use_container_width=True):
             st.session_state.pop("prediction", None)
             st.session_state.pop("llm_report", None)
+            st.session_state.pop("compliance_result", None)
             st.rerun()
 
-    # 三栏：仪表盘、关键指标、SHAP
-    col1, col2, col3 = st.columns([1.2, 1, 2])
+    # ===== 结果区 Tab：模型预测 / 政策合规检查 =====
+    tab_pred, tab_compliance = st.tabs(["📊 预测结果", "⚖️ 合规检查"])
 
-    with col1:
-        fig_gauge = gauge_chart(prob_pct, title="违约概率")
-        st.plotly_chart(fig_gauge, use_container_width=True)
-
-    with col2:
-        st.markdown(f"""
-        <div style='padding: 20px; background-color: #f8f9fa; border-radius: 10px; height: 100%;'>
-            <h4>风险等级</h4>
-            <h2 style='color: {risk_color};'>{risk_level}</h2>
-            <hr>
-            <h4>建议</h4>
-            <h3>{recommendation}</h3>
-            <hr>
-            <p style='font-size: 0.85em; color: gray;'>
-                违约概率: {prob_pct:.2f}%<br>
-                建议月供: ¥{input_data['installment']:,.2f}
-            </p>
-        </div>
-        """, unsafe_allow_html=True)
-
-    with col3:
-        if explanation:
-            fig_waterfall = shap_waterfall(
-                explanation.feature_names,
-                explanation.feature_values,
-                explanation.shap_values,
-                explanation.base_value,
-                top_n=8,
+    with tab_pred:
+        # 结果区统一包进带 key 的容器，便于用 CSS 做窄屏自适应堆叠
+        with st.container(key="pred_result"):
+            # —— 一级：核心结论（按决策优先级排序：违约概率 → 风险等级 → 审批建议 → 建议月供）——
+            risk_text_color = _RISK_COLORS.get(risk_color, "#1a3a5c")
+            st.markdown(
+                f"""
+                <div class="pred-hero">
+                    <div class="pred-hero__cell">
+                        <div class="pred-hero__label">违约概率</div>
+                        <div class="pred-hero__value">{prob_pct:.2f}<span class="pred-hero__unit">%</span></div>
+                    </div>
+                    <div class="pred-hero__cell">
+                        <div class="pred-hero__label">风险等级</div>
+                        <div class="pred-hero__value" style="color:{risk_text_color};">{risk_level}</div>
+                    </div>
+                    <div class="pred-hero__cell">
+                        <div class="pred-hero__label">审批建议</div>
+                        <div class="pred-hero__value pred-hero__value--sub">{recommendation}</div>
+                    </div>
+                    <div class="pred-hero__cell">
+                        <div class="pred-hero__label">建议月供</div>
+                        <div class="pred-hero__value pred-hero__value--sub">¥{input_data['installment']:,.2f}</div>
+                    </div>
+                </div>
+                """,
+                unsafe_allow_html=True,
             )
-            st.plotly_chart(fig_waterfall, use_container_width=True)
-        else:
-            st.info("SHAP 分析器加载失败")
 
-    # ===== Top 特征贡献表 =====
-    if explanation:
-        st.markdown("### 📋 关键特征贡献")
-        top_features = explanation.get_top_features(top_n=10)
-        df_top = pd.DataFrame(top_features)
-        st.dataframe(df_top, use_container_width=True, hide_index=True)
+            # —— 二级：决策依据（概率仪表盘 + SHAP 特征贡献）——
+            st.markdown("#### 📈 决策依据")
+            col_gauge, col_shap = st.columns([1, 1.6], gap="medium")
+
+            with col_gauge:
+                fig_gauge = gauge_chart(prob_pct, title="违约概率")
+                st.plotly_chart(fig_gauge, use_container_width=True)
+
+            with col_shap:
+                if explanation:
+                    fig_waterfall = shap_waterfall(
+                        explanation.feature_names,
+                        explanation.feature_values,
+                        explanation.shap_values,
+                        explanation.base_value,
+                        top_n=8,
+                    )
+                    st.plotly_chart(fig_waterfall, use_container_width=True)
+                else:
+                    st.info("SHAP 分析器加载失败")
+
+            # —— 三级：关键特征贡献明细 ——
+            if explanation:
+                st.markdown("#### 📋 关键特征贡献")
+                st.caption(
+                    "按对本次预测的影响力排序（Top 10）：SHAP 值为正表示推高违约风险，为负表示降低违约风险。"
+                )
+                top_features = explanation.get_top_features(top_n=10)
+                df_top = pd.DataFrame(top_features).rename(
+                    columns={
+                        "feature": "特征",
+                        "value": "取值",
+                        "shap_value": "SHAP 值",
+                        "direction": "影响方向",
+                    }
+                )
+                st.dataframe(df_top, use_container_width=True, hide_index=True)
+
+    with tab_compliance:
+        st.markdown("### ⚖️ 政策合规检查")
+        st.caption(
+            "调用 LLM，依据预设监管规则（利率上限、还款能力证明、资金用途限制等）"
+            "逐条审查本次审批是否合规。"
+        )
+
+        if st.button("⚖️ 运行合规检查", type="primary"):
+            try:
+                from src.llm.client import DeepSeekClient
+                from src.llm.prompts import PromptManager
+                from src.llm.agents.compliance_agent import ComplianceAgent
+
+                llm_cfg = configs.get("llm")
+                client = DeepSeekClient(llm_cfg)
+                pm = PromptManager(llm_cfg)
+                agent = ComplianceAgent(client, pm, llm_cfg.agents.compliance)
+
+                with st.spinner("合规审查中..."):
+                    st.session_state["compliance_result"] = agent.check(
+                        features=input_data,
+                        decision=recommendation,
+                        interest_rate=float(input_data["interestRate"]),
+                    )
+            except Exception as e:
+                st.error(f"合规检查失败: {e}")
+                st.caption(
+                    "常见原因：模型返回内容为空或非 JSON（可调大 configs/llm_config.yaml 中 "
+                    "agents.compliance.max_tokens），或 API Key/网络异常。"
+                )
+
+        compliance_result = st.session_state.get("compliance_result")
+        if compliance_result:
+            _render_compliance_result(compliance_result)
+        else:
+            st.info("本次审批结果尚未经过合规审查，点击上方按钮开始检查。")
 
     # ===== LLM 风险报告 =====
     st.divider()

@@ -22,6 +22,10 @@ from app.components.sidebar import render_sidebar
 st.set_page_config(page_title="LLM 智能助手", page_icon="💬", layout="wide")
 render_sidebar()
 
+# ===== 登录门禁（登录用户均可访问）=====
+from app.components.auth_gate import require_login
+require_login()
+
 st.title("💬 LLM 智能助手")
 st.caption("基于 DeepSeek 大模型的风控领域 AI 助手")
 

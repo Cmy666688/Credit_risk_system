@@ -17,6 +17,10 @@ from app.components.sidebar import render_sidebar
 st.set_page_config(page_title="系统配置", page_icon="⚙️", layout="wide")
 render_sidebar()
 
+# ===== 角色权限门禁（管理员专属，指导书要求生产环境必须加权限校验）=====
+from app.components.auth_gate import require_admin
+require_admin()
+
 st.title("⚙️ 系统配置")
 st.caption("查看和编辑系统的所有 YAML 配置文件")
 

@@ -106,7 +106,11 @@ class FeatureAgent:
         system_prompt = self.prompts.get_system_role("feature_suggestion")
 
         # 调用 LLM
-        response = self.client.chat(prompt, system_prompt=system_prompt)
+        # 推理型模型的思维链会先占用 max_tokens 预算，
+        # 需由 agent 配置显式提高上限，否则正文尚未产出即被截断为空。
+        max_tokens = self.config.get("max_tokens")
+        chat_kwargs = {"max_tokens": int(max_tokens)} if max_tokens else {}
+        response = self.client.chat(prompt, system_prompt=system_prompt, **chat_kwargs)
 
         # 解析 JSON 响应
         return self._parse_response(response)

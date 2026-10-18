@@ -15,6 +15,15 @@ def render_sidebar():
         st.markdown("## 💳 风控系统")
         st.caption("机器学习课程综合实战")
 
+        # ===== 当前用户与退出登录 =====
+        user = st.session_state.get("user")
+        if user:
+            role_label = "🛡️ 管理员" if user.get("role") == "admin" else "👤 普通用户"
+            st.markdown(f"**{user['username']}** · {role_label}")
+            if st.button("🚪 退出登录", use_container_width=True):
+                st.session_state.pop("user", None)
+                st.rerun()
+
         st.divider()
 
         # 模型状态
@@ -67,6 +76,8 @@ def render_sidebar():
             - 模型训练：训练 + 评估
             - 单笔预测：贷款审批演示
             - 模型解释：SHAP 分析
+            - 模型监控：漂移与指标监控
+            - A/B 测试：模型对照实验
             - LLM 助手：智能对话
             - 系统配置：修改参数
             """)

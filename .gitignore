@@ -30,6 +30,7 @@ data/raw/
 data/processed/
 data/models/
 data/sample/
+data/auth/
 *.csv
 *.parquet
 *.pkl

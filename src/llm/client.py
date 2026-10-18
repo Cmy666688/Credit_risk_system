@@ -119,10 +119,31 @@ class DeepSeekClient:
             )
             duration = time.time() - t0
 
-            content = response.choices[0].message.content
+            choice = response.choices[0]
+            content = choice.message.content
+            finish_reason = choice.finish_reason
             usage = response.usage.model_dump() if response.usage else {}
 
             self._log_audit(prompt, content, duration, usage)
+
+            # 空内容/截断检测：推理型模型的思维链会先占用 max_tokens 预算，
+            # 预算不足时正文尚未产出即被截断，此时接口不报错但 content 为空。
+            if not content or not content.strip():
+                reasoning_tokens = (usage.get("completion_tokens_details") or {}).get(
+                    "reasoning_tokens"
+                )
+                raise RuntimeError(
+                    f"LLM 返回空内容（finish_reason={finish_reason}, "
+                    f"completion_tokens={usage.get('completion_tokens')}, "
+                    f"reasoning_tokens={reasoning_tokens}）。"
+                    f"若为推理型模型，请调大 max_tokens 或减少输出要求后重试。"
+                )
+            if finish_reason == "length":
+                logger.warning(
+                    f"LLM 输出被 max_tokens 截断（finish_reason=length, "
+                    f"completion_tokens={usage.get('completion_tokens')}），结构化解析可能失败"
+                )
+
             logger.info(f"LLM 调用完成 - 耗时 {duration:.2f}s, tokens={usage}")
             return content
 

@@ -18,7 +18,7 @@ def gauge_chart(value: float, title: str = "违约概率", max_value: float = 10
     fig = go.Figure(go.Indicator(
         mode="gauge+number+delta",
         value=value,
-        number={"suffix": "%", "font": {"size": 40}},
+        number={"suffix": "%", "valueformat": ".2f", "font": {"size": 40}},
         title={"text": title, "font": {"size": 18}},
         gauge={
             "axis": {"range": [0, max_value], "tickwidth": 1},

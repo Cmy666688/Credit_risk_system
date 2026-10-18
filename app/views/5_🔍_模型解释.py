@@ -20,6 +20,10 @@ from app.components.chart_utils import feature_importance_bar
 st.set_page_config(page_title="模型解释", page_icon="🔍", layout="wide")
 render_sidebar()
 
+# ===== 登录门禁（登录用户均可访问）=====
+from app.components.auth_gate import require_login
+require_login()
+
 st.title("🔍 模型解释 (SHAP)")
 st.caption("理解模型为什么这么判 - 全局重要性 + 局部解释")
 

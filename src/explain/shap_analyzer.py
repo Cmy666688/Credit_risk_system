@@ -184,8 +184,11 @@ class SHAPAnalyzer:
         """根据模型类型自动选择 explainer"""
         model_class_name = model.__class__.__name__.lower()
 
-        # 树模型
-        if any(k in model_class_name for k in ["xgb", "lgbm", "cat", "tree", "forest", "gbm"]):
+        # 树模型（LightGBM 加载后为 Booster）
+        if any(
+            k in model_class_name
+            for k in ["xgb", "lgbm", "lgb", "booster", "cat", "tree", "forest", "gbm"]
+        ):
             return "tree"
         # PyTorch 模型
         if "module" in str(type(model).__mro__).lower() or hasattr(model, "forward"):

@@ -116,3 +116,37 @@ def render_data_status_or_stop(
         st.info(f"🧪 已加载 **合成示例数据**：{n_rows:,} 行 × {df.shape[1]} 列（来自 generate_sample_data.py）")
 
     return df
+
+
+# ===== Lending Club 数据源（扩展点 3：添加新数据源）=====
+LC_RELATIVE_PATH = ("data", "external", "lending_club.csv")
+
+
+def find_lending_club_file(root: Path) -> Optional[Path]:
+    """查找 Lending Club 数据文件（真实数据集，或由生成脚本产出的同路径文件）。"""
+    path = root.joinpath(*LC_RELATIVE_PATH)
+    return path if path.exists() else None
+
+
+@st.cache_data(show_spinner=False)
+def load_lending_club_data(
+    root_str: str,
+    nrows: Optional[int] = None,
+) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    加载 Lending Club 原始数据，并套用 Adapter 归一化成天池 schema。
+
+    返回
+    ----
+    (raw_df, normalized_df)：原始 schema 与归一化后的 DataFrame。
+    文件不存在时返回 (空DF, 空DF)。
+    """
+    from src.data.adapters import LendingClubAdapter
+
+    path = find_lending_club_file(Path(root_str))
+    if path is None:
+        return pd.DataFrame(), pd.DataFrame()
+
+    raw = pd.read_csv(path, nrows=nrows)
+    normalized = LendingClubAdapter().transform(raw)
+    return raw, normalized

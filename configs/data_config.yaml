@@ -22,6 +22,23 @@ paths:
   test_file: "testA.csv"
   sample_file: "sample.csv"
 
+  # 当前启用的数据源（取值需出现在下方 sources 中）
+  source: "tianchi"
+
+# 多数据源配置（扩展点 3：添加新数据源）
+# source 指向哪个源，DataLoader 就读取该源的路径，并套用其 Adapter 归一化 schema
+sources:
+  tianchi:
+    adapter: null            # 原生数据，已是天池 schema，无需适配
+    raw_dir: "./data/raw"
+    train_file: "train.csv"
+    test_file: "testA.csv"
+  lending_club:
+    adapter: "lending_club"
+    raw_dir: "./data/external"
+    train_file: "lending_club.csv"
+    test_file: "lending_club.csv"    # LC 真实数据集未单独拆分测试集
+
 # 标签列
 target_column: "isDefault"
 

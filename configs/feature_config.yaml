@@ -5,12 +5,24 @@
 
 # ===== 缺失值处理 =====
 missing_value:
-  # 数值型缺失值处理策略：mean / median / zero / drop
+  # 数值型缺失值处理策略（全局默认）：mean / median / zero / drop
   numerical_strategy: "median"
-  # 类别型缺失值处理策略：mode / unknown / drop
+  # 类别型缺失值处理策略（全局默认）：mode / unknown / drop
   categorical_strategy: "unknown"
   # 缺失率阈值，超过此值的列将被丢弃
   drop_threshold: 0.95
+
+  # 扩展点 6：按列覆盖填充策略（未列出的列沿用上面的全局默认策略）
+  # 可取值：数值列 mean / median / zero / mode / knn；类别列 mode / unknown
+  strategy:
+    annualIncome: median     # 中位数
+    employmentLength: mode   # 众数
+    dti: knn                 # KNN 填充（由 src/data/preprocessor.py 实现）
+
+  # KNN 策略参数（仅当有列使用 knn 时生效）
+  knn_neighbors: 5           # 邻居数
+  knn_reference_sample: 2000 # 参与"找邻居"的训练样本上限（防止 O(n×n) 爆内存）
+  knn_batch_size: 10000      # 推理时分批大小（限制距离矩阵内存）
 
 # ===== 类别编码 =====
 encoding:

@@ -217,5 +217,53 @@ class TestSHAP:
         assert len(explanation.feature_names) == X_processed.shape[1]
 
 
+# ===== 测试 LightGBM =====
+class TestLGB:
+    def test_fit_predict(self, configs, sample_df):
+        from src.models.lgb_model import LGBModel
+        from src.data.preprocessor import Preprocessor
+
+        prep = Preprocessor(configs.get("data"), configs.get("feature"))
+        X = sample_df.drop(columns=["isDefault", "id"])
+        y = sample_df["isDefault"]
+        X_processed = prep.fit_transform(X)
+
+        # 减少 estimators 加快测试
+        configs.get("model").lightgbm.params.n_estimators = 50
+        configs.get("model").lightgbm.early_stopping.enabled = False
+
+        model = LGBModel(configs.get("model").lightgbm)
+        model.fit(X_processed, y)
+
+        proba = model.predict_proba(X_processed)
+        assert proba.shape == (len(y),)
+        assert (proba >= 0).all() and (proba <= 1).all()
+
+    def test_save_load(self, configs, sample_df, tmp_path):
+        from src.models.lgb_model import LGBModel
+        from src.data.preprocessor import Preprocessor
+
+        prep = Preprocessor(configs.get("data"), configs.get("feature"))
+        X = sample_df.drop(columns=["isDefault", "id"])
+        y = sample_df["isDefault"]
+        X_processed = prep.fit_transform(X)
+
+        configs.get("model").lightgbm.params.n_estimators = 50
+        configs.get("model").lightgbm.early_stopping.enabled = False
+
+        model = LGBModel(configs.get("model").lightgbm)
+        model.fit(X_processed, y)
+
+        save_path = tmp_path / "test_lgb.txt"
+        model.save(str(save_path))
+        assert save_path.exists()
+
+        model2 = LGBModel(configs.get("model").lightgbm)
+        model2.load(str(save_path))
+        proba1 = model.predict_proba(X_processed.head(10))
+        proba2 = model2.predict_proba(X_processed.head(10))
+        assert np.allclose(proba1, proba2, rtol=1e-5)
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])

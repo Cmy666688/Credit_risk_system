@@ -43,6 +43,11 @@ training_pipeline:
       class: "XGBModel"
       enabled: true
 
+    - name: "train_lightgbm"
+      module: "src.models.lgb_model"
+      class: "LGBModel"
+      enabled: true
+
     - name: "train_mlp"
       module: "src.models.mlp_model"
       class: "MLPModel"
